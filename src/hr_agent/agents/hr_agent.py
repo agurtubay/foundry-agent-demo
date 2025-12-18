@@ -5,7 +5,7 @@ import time
 import uuid
 import sys
 from opentelemetry.trace import get_current_span
-from typing import Optional
+from typing import Optional, AsyncGenerator, Union
 
 from azure.identity.aio import DefaultAzureCredential
 
@@ -15,7 +15,6 @@ from semantic_kernel.functions import kernel_function
 from hr_agent.config import settings
 from hr_agent.search.retriever import search_hr_chunks
 from hr_agent.telemetry import get_tracer
-from hr_agent.thread_store import ThreadStore
 from hr_agent.cosmos_thread_store import CosmosThreadStore
 from hr_agent.session_store import SessionStore
 
@@ -91,25 +90,30 @@ async def ask(
     thread_id: Optional[str] = None,
     reuse_thread: bool = True,
     stream: bool = False,
-    cosmos_tid: Optional[str] = None
-) -> tuple[str, Optional[str]]:
+    cosmos_tid: Optional[str] = None,
+    session_id: Optional[str] = None
+) -> Union[tuple[str, Optional[str]], AsyncGenerator[dict, None]]:
     """
-    Returns (answer_text, thread_id_used).
-    If reuse_thread=True, we load/save thread_id locally to skip create_thread overhead next runs.
-    If stream=True, we stream incremental content to console and build the final answer text.
+    Ask the HR agent a question.
+    
+    When stream=False: Returns tuple (answer_text, thread_id_used).
+    When stream=True: Returns async generator yielding dict chunks:
+        - {"type": "chunk", "content": "text"}
+        - {"type": "done", "thread_id": "..."}
+    
+    If reuse_thread=True, we load/save thread_id from Cosmos to skip create_thread overhead next runs.
+    If session_id is not provided, it will be loaded from/created in local storage (for CLI mode).
     """
-    local_store = ThreadStore.default()
-    session_id = SessionStore.default().load_or_create()
+    # Only use local session store if session_id is not explicitly provided (CLI mode)
+    if session_id is None:
+        session_id = SessionStore.default().load_or_create()
+    
     cosmos = await get_cosmos_store()
 
     if reuse_thread and not thread_id:
-        # 1) Cosmos
+        # Load thread_id from Cosmos for this session
         cosmos_tid = await cosmos.get_thread_id(session_id)
         thread_id = cosmos_tid
-
-        # 2) fallback local
-        if not thread_id:
-            thread_id = local_store.load()
 
     global _cached_credential, _cached_client
     if _cached_credential is None:
@@ -166,9 +170,6 @@ async def ask(
             span.set_attribute("thread.id", tid or "")
 
             if reuse_thread and tid:
-                # Local fallback (cheap) - always OK
-                local_store.save(tid)
-
                 # ✅ Cosmos write only if missing/changed
                 if not cosmos_tid or tid != cosmos_tid:
                     await cosmos.upsert_thread_id(session_id, tid)
@@ -178,28 +179,29 @@ async def ask(
             answer_text = _to_text(getattr(resp, "content", resp))
             return (answer_text, tid)
         
-        # STREAMING MODE
-        final_parts: list[str] = []
-        first_token_ms: Optional[int] = None
-
-        async for msg in agent.invoke(messages=question, thread=thread):
+        # STREAMING MODE - yield chunks as generator
+        async def _stream_generator():
+            first_token_ms: Optional[int] = None
             
-            text = getattr(msg, "content", None) or ""
-            if text:
-                if first_token_ms is None:
-                    first_token_ms = int((time.perf_counter() - t0) * 1000)
-                    span.set_attribute("agent.first_token_ms", first_token_ms)
-                print(text, end="", flush=True)
-                final_parts.append(text)
+            # Use invoke_stream for true token-level streaming if available
+            # Otherwise fall back to invoke which may yield complete messages
+            async for msg in agent.invoke_stream(messages=question, thread=thread):
+                text = _to_text(getattr(msg, "content", None))
+                if text:
+                    if first_token_ms is None:
+                        first_token_ms = int((time.perf_counter() - t0) * 1000)
+                        span.set_attribute("agent.first_token_ms", first_token_ms)
+                    yield {"type": "chunk", "content": text}
 
-        elapsed_ms = int((time.perf_counter() - t0) * 1000)
-        span.set_attribute("agent.elapsed_ms", elapsed_ms)
-        print() 
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            span.set_attribute("agent.elapsed_ms", elapsed_ms)
 
-        tid = getattr(thread, "id", None)
-        span.set_attribute("thread.id", tid or "")
-        if reuse_thread and tid:
-            local_store.save(tid)
-            if not cosmos_tid or tid != cosmos_tid:
-                await cosmos.upsert_thread_id(session_id, tid)
-        return ("".join(final_parts).strip(), tid)
+            tid = getattr(thread, "id", None)
+            span.set_attribute("thread.id", tid or "")
+            if reuse_thread and tid:
+                if not cosmos_tid or tid != cosmos_tid:
+                    await cosmos.upsert_thread_id(session_id, tid)
+            
+            yield {"type": "done", "thread_id": tid}
+        
+        return _stream_generator()

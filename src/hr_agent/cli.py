@@ -17,17 +17,43 @@ async def _main() -> None:
 
     setup_telemetry()
 
-    answer, tid = await ask(
-        question=args.question,
-        thread_id=args.thread_id,
-        reuse_thread=(not args.no_reuse_thread),
-        stream=args.stream,
-    )
+    if args.stream:
+        # Handle streaming response
+        stream = await ask(
+            question=args.question,
+            thread_id=args.thread_id,
+            reuse_thread=(not args.no_reuse_thread),
+            stream=True,
+        )
+        
+        print("\n\n=== STREAMING ANSWER ===\n")
+        accumulated = []
+        tid = None
+        
+        async for chunk in stream:
+            if chunk["type"] == "chunk":
+                content = chunk["content"]
+                print(content, end="", flush=True)
+                accumulated.append(content)
+            elif chunk["type"] == "done":
+                tid = chunk.get("thread_id")
+        
+        print("\n")
+        if tid:
+            print(f"\n[thread_id] {tid}")
+    else:
+        # Handle non-streaming response
+        answer, tid = await ask(
+            question=args.question,
+            thread_id=args.thread_id,
+            reuse_thread=(not args.no_reuse_thread),
+            stream=False,
+        )
 
-    print("\n\n=== ANSWER ===\n")
-    print(answer)
-    if tid:
-        print(f"\n[thread_id] {tid}")
+        print("\n\n=== ANSWER ===\n")
+        print(answer)
+        if tid:
+            print(f"\n[thread_id] {tid}")
 
 
 if __name__ == "__main__":
