@@ -22,6 +22,9 @@ from hr_agent.session_store import SessionStore
 tracer = get_tracer("hr-agent.agent")
 
 _cosmos_store = None
+_cached_credential: DefaultAzureCredential | None = None
+_cached_client = None
+_cached_agent_definition = None
 
 def _to_text(x) -> str:
     """Coerce SK response content (ChatMessageContent / list / etc.) into plain text."""
@@ -60,7 +63,12 @@ class HRSearchPlugin:
         return json.dumps(compact, ensure_ascii=False)
 
 
-async def _get_or_create_agent(client) -> AzureAIAgent:
+async def _get_or_create_agent_definition(client):
+    global _cached_agent_definition
+    # Cache only the agent definition, not the agent wrapper
+    if _cached_agent_definition is not None:
+        return _cached_agent_definition
+    
     # Reuse existing Foundry agent if provided, else create a simple one
     if settings.agent_id:
         agent_definition = await client.agents.get_agent(settings.agent_id)
@@ -74,7 +82,8 @@ async def _get_or_create_agent(client) -> AzureAIAgent:
                 "If you cannot find the answer, say so."
             ),
         )
-    return AzureAIAgent(client=client, definition=agent_definition, plugins=[HRSearchPlugin()])
+    _cached_agent_definition = agent_definition
+    return _cached_agent_definition
 
 
 async def ask(
@@ -102,86 +111,95 @@ async def ask(
         if not thread_id:
             thread_id = local_store.load()
 
-    async with DefaultAzureCredential() as creds:
-        async with AzureAIAgent.create_client(credential=creds, endpoint=settings.agent_endpoint) as client:
-            agent = await _get_or_create_agent(client)
+    global _cached_credential, _cached_client
+    if _cached_credential is None:
+        _cached_credential = DefaultAzureCredential()
+    
+    # Cache the client to avoid closing it
+    if _cached_client is None:
+        _cached_client = await AzureAIAgent.create_client(credential=_cached_credential, endpoint=settings.agent_endpoint).__aenter__()
+    
+    client = _cached_client
+    agent_definition = await _get_or_create_agent_definition(client)
+    # Create fresh agent wrapper with cached definition but current client
+    agent = AzureAIAgent(client=client, definition=agent_definition, plugins=[HRSearchPlugin()])
 
-            thread = (
-                AzureAIAgentThread(client=client, thread_id=thread_id)
-                if thread_id
-                else AzureAIAgentThread(client=client)
-            )
+    thread = (
+        AzureAIAgentThread(client=client, thread_id=thread_id)
+        if thread_id
+        else AzureAIAgentThread(client=client)
+    )
 
-            with tracer.start_as_current_span("agent.ask") as span:
-                t_setup0 = time.perf_counter()
-                span.add_event("start.ask")
+    with tracer.start_as_current_span("agent.ask") as span:
+        t_setup0 = time.perf_counter()
+        span.add_event("start.ask")
 
-                span.set_attribute("agent.id", agent.id)
-                run_id = str(uuid.uuid4())
-                span.set_attribute("run.id", run_id)
-                span.set_attribute("question.len", len(question))
-                
-                # print trace_id for easy filtering in portal (take it from THIS span)
-                span_ctx = span.get_span_context()
-                trace_id_hex = format(span_ctx.trace_id, "032x")
-                print(f"[run_id] {run_id}")
-                print(f"[trace_id] {trace_id_hex}")
+        span.set_attribute("agent.id", agent.id)
+        run_id = str(uuid.uuid4())
+        span.set_attribute("run.id", run_id)
+        span.set_attribute("question.len", len(question))
+        
+        # print trace_id for easy filtering in portal (take it from THIS span)
+        span_ctx = span.get_span_context()
+        trace_id_hex = format(span_ctx.trace_id, "032x")
+        print(f"[run_id] {run_id}")
+        print(f"[trace_id] {trace_id_hex}")
 
 
-                if getattr(thread, "id", None):
-                    span.set_attribute("thread.id", thread.id)
+        #if getattr(thread, "id", None):
+        #    span.set_attribute("thread.id", thread.id)
 
-                span.add_event("thread.ready")
+        span.add_event("thread.ready")
 
-                t0 = time.perf_counter()
+        t0 = time.perf_counter()
 
-                if not stream:
-                    span.add_event("before.get_response")
-                    resp = await agent.get_response(messages=question, thread=thread)
+        if not stream:
+            span.add_event("before.get_response")
+            resp = await agent.get_response(messages=question, thread=thread)
 
-                    span.add_event("after.get_response")
-                    span.set_attribute("get_response_ms", int((time.perf_counter() - t0) * 1000))
+            span.add_event("after.get_response")
+            span.set_attribute("get_response_ms", int((time.perf_counter() - t0) * 1000))
 
-                    tid = getattr(thread, "id", None) or getattr(getattr(resp, "thread", None), "id", None)
+            tid = getattr(thread, "id", None) or getattr(getattr(resp, "thread", None), "id", None)
 
-                    # ✅ thread id is definitive here
-                    span.set_attribute("thread.id", tid or "")
+            # ✅ thread id is definitive here
+            span.set_attribute("thread.id", tid or "")
 
-                    if reuse_thread and tid:
-                        # Local fallback (cheap) - always OK
-                        local_store.save(tid)
+            if reuse_thread and tid:
+                # Local fallback (cheap) - always OK
+                local_store.save(tid)
 
-                        # ✅ Cosmos write only if missing/changed
-                        if not cosmos_tid or tid != cosmos_tid:
-                            await cosmos.upsert_thread_id(session_id, tid)
+                # ✅ Cosmos write only if missing/changed
+                if not cosmos_tid or tid != cosmos_tid:
+                    await cosmos.upsert_thread_id(session_id, tid)
 
-                    elapsed_ms = int((time.perf_counter() - t0) * 1000)
-                    span.set_attribute("agent.elapsed_ms", elapsed_ms)
-                    answer_text = _to_text(getattr(resp, "content", resp))
-                    return (answer_text, tid)
-                
-                # STREAMING MODE
-                final_parts: list[str] = []
-                first_token_ms: Optional[int] = None
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            span.set_attribute("agent.elapsed_ms", elapsed_ms)
+            answer_text = _to_text(getattr(resp, "content", resp))
+            return (answer_text, tid)
+        
+        # STREAMING MODE
+        final_parts: list[str] = []
+        first_token_ms: Optional[int] = None
 
-                async for msg in agent.invoke(messages=question, thread=thread):
-                    
-                    text = getattr(msg, "content", None) or ""
-                    if text:
-                        if first_token_ms is None:
-                            first_token_ms = int((time.perf_counter() - t0) * 1000)
-                            span.set_attribute("agent.first_token_ms", first_token_ms)
-                        print(text, end="", flush=True)
-                        final_parts.append(text)
+        async for msg in agent.invoke(messages=question, thread=thread):
+            
+            text = getattr(msg, "content", None) or ""
+            if text:
+                if first_token_ms is None:
+                    first_token_ms = int((time.perf_counter() - t0) * 1000)
+                    span.set_attribute("agent.first_token_ms", first_token_ms)
+                print(text, end="", flush=True)
+                final_parts.append(text)
 
-                elapsed_ms = int((time.perf_counter() - t0) * 1000)
-                span.set_attribute("agent.elapsed_ms", elapsed_ms)
-                print() 
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        span.set_attribute("agent.elapsed_ms", elapsed_ms)
+        print() 
 
-                tid = getattr(thread, "id", None)
-                span.set_attribute("thread.id", tid or "")
-                if reuse_thread and tid:
-                    local_store.save(tid)
-                    if not cosmos_tid or tid != cosmos_tid:
-                        await cosmos.upsert_thread_id(session_id, tid)
-                return ("".join(final_parts).strip(), tid)
+        tid = getattr(thread, "id", None)
+        span.set_attribute("thread.id", tid or "")
+        if reuse_thread and tid:
+            local_store.save(tid)
+            if not cosmos_tid or tid != cosmos_tid:
+                await cosmos.upsert_thread_id(session_id, tid)
+        return ("".join(final_parts).strip(), tid)
