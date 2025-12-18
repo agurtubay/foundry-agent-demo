@@ -4,7 +4,7 @@ import json
 import time
 import uuid
 import sys
-from opentelemetry.trace import get_current_span
+from opentelemetry.trace import get_current_span, use_span
 from typing import Optional, AsyncGenerator, Union
 
 from azure.identity.aio import DefaultAzureCredential
@@ -110,10 +110,13 @@ async def ask(
     
     cosmos = await get_cosmos_store()
 
-    if reuse_thread and not thread_id:
-        # Load thread_id from Cosmos for this session
+    # Always load cosmos_tid when reuse_thread=True, so we can detect changes
+    if reuse_thread:
         cosmos_tid = await cosmos.get_thread_id(session_id)
-        thread_id = cosmos_tid
+        if not thread_id:
+            thread_id = cosmos_tid
+    else:
+        cosmos_tid = None
 
     global _cached_credential, _cached_client
     if _cached_credential is None:
@@ -134,30 +137,30 @@ async def ask(
         else AzureAIAgentThread(client=client)
     )
 
-    with tracer.start_as_current_span("agent.ask") as span:
-        t_setup0 = time.perf_counter()
-        span.add_event("start.ask")
+    # Start span manually so it stays open during streaming
+    span = tracer.start_span("agent.ask")
+    span_ctx = span.get_span_context()
+    
+    # For non-streaming, use context manager as before
+    if not stream:
+        with use_span(span, end_on_exit=True):
+            t_setup0 = time.perf_counter()
+            span.add_event("start.ask")
 
-        span.set_attribute("agent.id", agent.id)
-        run_id = str(uuid.uuid4())
-        span.set_attribute("run.id", run_id)
-        span.set_attribute("question.len", len(question))
-        
-        # print trace_id for easy filtering in portal (take it from THIS span)
-        span_ctx = span.get_span_context()
-        trace_id_hex = format(span_ctx.trace_id, "032x")
-        print(f"[run_id] {run_id}")
-        print(f"[trace_id] {trace_id_hex}")
+            span.set_attribute("agent.id", agent.id)
+            run_id = str(uuid.uuid4())
+            span.set_attribute("run.id", run_id)
+            span.set_attribute("question.len", len(question))
+            
+            # print trace_id for easy filtering in portal (take it from THIS span)
+            trace_id_hex = format(span_ctx.trace_id, "032x")
+            print(f"[run_id] {run_id}")
+            print(f"[trace_id] {trace_id_hex}")
 
+            span.add_event("thread.ready")
 
-        #if getattr(thread, "id", None):
-        #    span.set_attribute("thread.id", thread.id)
+            t0 = time.perf_counter()
 
-        span.add_event("thread.ready")
-
-        t0 = time.perf_counter()
-
-        if not stream:
             span.add_event("before.get_response")
             resp = await agent.get_response(messages=question, thread=thread)
 
@@ -169,39 +172,57 @@ async def ask(
             # ✅ thread id is definitive here
             span.set_attribute("thread.id", tid or "")
 
-            if reuse_thread and tid:
-                # ✅ Cosmos write only if missing/changed
-                if not cosmos_tid or tid != cosmos_tid:
-                    await cosmos.upsert_thread_id(session_id, tid)
+            # Only write to Cosmos if thread ID changed from what's stored
+            if reuse_thread and tid and tid != cosmos_tid:
+                await cosmos.upsert_thread_id(session_id, tid)
 
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
             span.set_attribute("agent.elapsed_ms", elapsed_ms)
             answer_text = _to_text(getattr(resp, "content", resp))
             return (answer_text, tid)
-        
-        # STREAMING MODE - yield chunks as generator
-        async def _stream_generator():
-            first_token_ms: Optional[int] = None
-            
-            # Use invoke_stream for true token-level streaming if available
-            # Otherwise fall back to invoke which may yield complete messages
-            async for msg in agent.invoke_stream(messages=question, thread=thread):
-                text = _to_text(getattr(msg, "content", None))
-                if text:
-                    if first_token_ms is None:
-                        first_token_ms = int((time.perf_counter() - t0) * 1000)
-                        span.set_attribute("agent.first_token_ms", first_token_ms)
-                    yield {"type": "chunk", "content": text}
+    
+    # STREAMING MODE - keep span open during generator consumption
+    t_setup0 = time.perf_counter()
+    span.add_event("start.ask")
+    span.set_attribute("agent.id", agent.id)
+    run_id = str(uuid.uuid4())
+    span.set_attribute("run.id", run_id)
+    span.set_attribute("question.len", len(question))
+    
+    trace_id_hex = format(span_ctx.trace_id, "032x")
+    print(f"[run_id] {run_id}")
+    print(f"[trace_id] {trace_id_hex}")
+    
+    span.add_event("thread.ready")
+    t0 = time.perf_counter()
+    
+    async def _stream_generator():
+        try:
+            with use_span(span, end_on_exit=False):
+                first_token_ms: Optional[int] = None
+                
+                # Use invoke_stream for true token-level streaming if available
+                # Otherwise fall back to invoke which may yield complete messages
+                async for msg in agent.invoke_stream(messages=question, thread=thread):
+                    text = _to_text(getattr(msg, "content", None))
+                    if text:
+                        if first_token_ms is None:
+                            first_token_ms = int((time.perf_counter() - t0) * 1000)
+                            span.set_attribute("agent.first_token_ms", first_token_ms)
+                        yield {"type": "chunk", "content": text}
 
-            elapsed_ms = int((time.perf_counter() - t0) * 1000)
-            span.set_attribute("agent.elapsed_ms", elapsed_ms)
+                elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                span.set_attribute("agent.elapsed_ms", elapsed_ms)
 
-            tid = getattr(thread, "id", None)
-            span.set_attribute("thread.id", tid or "")
-            if reuse_thread and tid:
-                if not cosmos_tid or tid != cosmos_tid:
+                tid = getattr(thread, "id", None)
+                span.set_attribute("thread.id", tid or "")
+                # Only write to Cosmos if thread ID changed from what's stored
+                if reuse_thread and tid and tid != cosmos_tid:
                     await cosmos.upsert_thread_id(session_id, tid)
-            
-            yield {"type": "done", "thread_id": tid}
-        
-        return _stream_generator()
+                
+                yield {"type": "done", "thread_id": tid}
+        finally:
+            # End the span when generator completes or is closed
+            span.end()
+    
+    return _stream_generator()
