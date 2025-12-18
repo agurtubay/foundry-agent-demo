@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Chatbot</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(135deg, #e0e7ff 0%, #f8fafc 100%);
+            font-family: 'Segoe UI', Arial, sans-serif;
+            min-height: 100vh;
+        }
+        .main-container {
+            display: flex;
+            height: 100vh;
+            width: 100%;
+        }
+        .chatbot-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 1rem;
+        }
+        .debug-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 1rem;
+            background: #f8f9fa;
+            border-left: 2px solid #e5e7eb;
+        }
+        .chat-card {
+            background: #fff;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+            border-radius: 18px;
+            width: 100%;
+            max-width: 480px;
+            min-height: 70vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .debug-card {
+            background: #fff;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.08);
+            border-radius: 18px;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .chat-header, .debug-header {
+            background: #6366f1;
+            color: #fff;
+            padding: 1.2rem 1.5rem;
+            font-size: 1.4rem;
+            font-weight: 600;
+            text-align: center;
+            letter-spacing: 1px;
+        }
+        .debug-header {
+            background: #059669;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .clear-debug-btn {
+            background: #dc2626;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            padding: 0.3rem 0.8rem;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .clear-debug-btn:hover {
+            background: #b91c1c;
+        }
+        #chat, #debug-output {
+            flex: 1;
+            padding: 1.2rem;
+            overflow-y: auto;
+            background: #f3f4f6;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            line-height: 1.4;
+        }
+        #debug-output {
+            background: #1f2937;
+            color: #f9fafb;
+        }
+        .message {
+            margin-bottom: 0.8rem;
+            display: flex;
+            flex-direction: column;
+        }
+        .message.user {
+            align-items: flex-end;
+        }
+        .message.bot {
+            align-items: flex-start;
+        }
+        .bubble {
+            max-width: 80%;
+            padding: 0.7rem 1.1rem;
+            border-radius: 16px;
+            font-size: 1rem;
+            line-height: 1.5;
+            word-break: break-word;
+        }
+        .user .bubble {
+            background: #6366f1;
+            color: #fff;
+            border-bottom-right-radius: 4px;
+        }
+        .bot .bubble {
+            background: #e0e7ff;
+            color: #222;
+            border-bottom-left-radius: 4px;
+        }
+        .bubble img {
+            max-width: 100%;
+            max-height: 240px;
+            border-radius: 10px;
+            display: block;
+            margin: 0.5em 0;
+        }
+        .input-area {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 1rem 1.2rem;
+            background: #f9fafb;
+            border-top: 1px solid #e5e7eb;
+        }
+        #messageInput {
+            flex: 1;
+            padding: 0.7rem 1rem;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            font-size: 1rem;
+            outline: none;
+            background: #fff;
+        }
+        #sendImageCheckbox {
+            margin-right: 0.2rem;
+        }
+        #imageInput {
+            display: none;
+        }
+        .input-area label {
+            font-size: 0.95rem;
+            color: #555;
+            cursor: pointer;
+        }
+        .input-area button {
+            background: #6366f1;
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            padding: 0.7rem 1.3rem;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .input-area button:hover {
+            background: #4f46e5;
+        }
+        .debug-entry {
+            margin-bottom: 1rem;
+            padding: 0.8rem;
+            border-radius: 8px;
+            background: #374151;
+            border-left: 4px solid #6366f1;
+        }
+        .debug-entry.incoming {
+            border-left-color: #10b981;
+        }
+        .debug-entry.outgoing {
+            border-left-color: #f59e0b;
+        }
+        .debug-entry.info {
+            border-left-color: #3b82f6;
+            background: #1e3a8a;
+        }
+        .debug-entry.error {
+            border-left-color: #ef4444;
+            background: #7f1d1d;
+        }
+        .debug-entry.stream {
+            border-left-color: #8b5cf6;
+            background: #581c87;
+        }
+        .debug-timestamp {
+            font-size: 0.8rem;
+            color: #9ca3af;
+            margin-bottom: 0.5rem;
+        }
+        .debug-label {
+            font-weight: bold;
+            margin-bottom: 0.3rem;
+        }
+        .debug-content {
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        @media (max-width: 1200px) {
+            .main-container {
+                flex-direction: column;
+            }
+            .chatbot-container, .debug-container {
+                flex: none;
+                height: 50vh;
+            }
+            .chat-card {
+                max-width: 100%;
+                min-height: auto;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="main-container">
+        <div class="chatbot-container">
+            <div class="chat-card">
+                <div class="chat-header">Chatbot</div>
+                <div id="chat"></div>
+                <div class="input-area">
+                    <input id="messageInput" type="text" autocomplete="off" placeholder="Type your message..."/>
+                    <label><input type="checkbox" id="sendImageCheckbox" onchange="toggleImageInput()"> Image</label>
+                    <input id="imageUrlInput" type="text" placeholder="Image URL" style="display:none; margin-left:0.5em; max-width:200px;"/>
+                    <button onclick="sendMessage()">Send</button>
+                    <button onclick="newChat()">New chat</button>
+                </div>
+            </div>
+        </div>
+        <div class="debug-container">
+            <div class="debug-card">
+                <div class="debug-header">
+                    <span>Raw JSON Input/Output</span>
+                    <button class="clear-debug-btn" onclick="clearDebugOutput()">Clear</button>
+                </div>
+                <div id="debug-output"></div>
+            </div>
+        </div>
+    </div>
+    <script>
+        // Use correct WebSocket protocol and host for both local and production
+        var ws_scheme = window.location.protocol === "https:" ? "wss" : "ws";
+        function getOrCreateSessionId() {
+        let sid = localStorage.getItem("hr_session_id");
+        if (!sid) {
+            sid = "session_" + crypto.randomUUID();
+            localStorage.setItem("hr_session_id", sid);
+        }
+        return sid;
+        }
+
+        function newChat() {
+        localStorage.removeItem("hr_session_id");
+        window.location.reload();
+        }
+
+        var sessionId = getOrCreateSessionId();
+        var ws = new WebSocket(
+        ws_scheme + "://" + window.location.host + "/ws?session_id=" + encodeURIComponent(sessionId)
+        );
+        var conversationHistory = [];
+        
+        function formatConversationHistory() {
+            return conversationHistory.map(item => {
+                if (item.role === 'user' || item.role === 'You') {
+                    return `user: ${item.msg}`;
+                } else {
+                    return `bot: ${item.msg}`;
+                }
+            }).join('\n');
+        }
+        
+        function addDebugEntry(type, label, content) {
+            var debugOutput = document.getElementById('debug-output');
+            var entry = document.createElement('div');
+            entry.className = 'debug-entry ' + type;
+            
+            var timestamp = document.createElement('div');
+            timestamp.className = 'debug-timestamp';
+            timestamp.textContent = new Date().toLocaleTimeString();
+            
+            var labelDiv = document.createElement('div');
+            labelDiv.className = 'debug-label';
+            labelDiv.textContent = label;
+            
+            var contentDiv = document.createElement('div');
+            contentDiv.className = 'debug-content';
+            contentDiv.textContent = typeof content === 'object' ? JSON.stringify(content, null, 2) : content;
+            
+            entry.appendChild(timestamp);
+            entry.appendChild(labelDiv);
+            entry.appendChild(contentDiv);
+            debugOutput.appendChild(entry);
+            debugOutput.scrollTop = debugOutput.scrollHeight;
+        }
+        
+        function clearDebugOutput() {
+            var debugOutput = document.getElementById('debug-output');
+            debugOutput.innerHTML = '';
+        }
+        
+        ws.onmessage = function(event) {
+            try {
+                var data = JSON.parse(event.data);
+                
+                // Handle debug logs
+                if (data.type === "debug_log") {
+                    addDebugEntry(data.log_type, data.message, data.data);
+                    return;
+                }
+                
+                // Handle regular chat responses
+                var answer = data.answer || event.data;
+                var agent = data.agent || 'Bot';
+                addMessage(agent, answer);
+                conversationHistory.push({role: agent, msg: answer});
+                addDebugEntry('incoming', 'Server Response', data);
+            } catch (e) {
+                addMessage('Bot', event.data);
+                conversationHistory.push({role: 'Bot', msg: event.data});
+                addDebugEntry('incoming', 'Raw Server Response', event.data);
+            }
+        };
+        
+        function toggleImageInput() {
+            var checkbox = document.getElementById("sendImageCheckbox");
+            var imageUrlInput = document.getElementById("imageUrlInput");
+            imageUrlInput.style.display = checkbox.checked ? "inline" : "none";
+        }
+        
+        function addMessage(role, text, hasImage) {
+            var chat = document.getElementById('chat');
+            var msgDiv = document.createElement('div');
+            msgDiv.className = 'message ' + (role === 'You' ? 'user' : 'bot');
+            var bubble = document.createElement('div');
+            bubble.className = 'bubble';
+            if (role !== 'You' && role !== 'user') {
+                var cleanText = (text || '').replace(/\\n|\n/g, '\n');
+                bubble.innerHTML = '<b>' + role.charAt(0).toUpperCase() + role.slice(1) + ':</b> ' + marked.parse(cleanText);
+            } else {
+                bubble.innerHTML = '<b>You:</b> ' + text;
+            }
+            msgDiv.appendChild(bubble);
+            if (hasImage) {
+                var imgTag = document.createElement('span');
+                imgTag.innerHTML = ' <span style="font-size:0.95em;color:#6366f1;">[Image sent]</span>';
+                bubble.appendChild(imgTag);
+            }
+            chat.appendChild(msgDiv);
+            chat.scrollTop = chat.scrollHeight;
+        }
+        
+        function sendMessage() {
+            var input = document.getElementById("messageInput");
+            var imageCheckbox = document.getElementById("sendImageCheckbox");
+            var hasImage = imageCheckbox.checked;
+            var message = input.value;
+            var payload = {
+                conversation_history: formatConversationHistory(),
+                has_image: hasImage,
+                customer_id: "CUST001",
+                message: message
+            };
+            
+            // Handle image
+            if (hasImage) {
+                var imageUrlInput = document.getElementById("imageUrlInput");
+                var imageUrl = imageUrlInput.value;
+                if (imageUrl) {
+                    payload.image_url = imageUrl;
+                    addMessage('user', message, true);
+                    conversationHistory.push({role: 'user', msg: message, has_image: true, image_url: imageUrl});
+                    addDebugEntry('outgoing', 'Client Request (with image URL)', payload);
+                    ws.send(JSON.stringify(payload));
+                    input.value = '';
+                    imageUrlInput.value = '';
+                    return;
+                } else {
+                    alert("Please enter an image URL.");
+                    return;
+                }
+            }
+            
+            // No image
+            addMessage('user', message, false);
+            conversationHistory.push({role: 'user', msg: message, has_image: false});
+            addDebugEntry('outgoing', 'Client Request', payload);
+            ws.send(JSON.stringify(payload));
+            input.value = '';
+        }
+        
+        document.getElementById("messageInput").addEventListener("keydown", function(e) {
+            if (e.key === "Enter") {
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>
