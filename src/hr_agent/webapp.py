@@ -1,3 +1,4 @@
+import asyncio
 import time
 from pathlib import Path
 from typing import Optional, cast, AsyncGenerator
@@ -93,6 +94,17 @@ async def ws_endpoint(ws: WebSocket):
                     "session_id": session_id
                 }))
                 
+                # Background task to show "Still working..." after 3 seconds
+                async def _show_progress():
+                    await asyncio.sleep(3.0)
+                    await ws.send_json(jsonable_encoder({
+                        "type": "status",
+                        "message_id": message_id,
+                        "status": "Still working..."
+                    }))
+                
+                progress_task = asyncio.create_task(_show_progress())
+                
                 stream_result = await ask(
                     user_msg,
                     thread_id=thread_id,
@@ -104,11 +116,17 @@ async def ws_endpoint(ws: WebSocket):
                 
                 accumulated_text = []
                 new_tid = None
+                first_chunk = True
                 
                 async for chunk in stream_generator:
                     if chunk["type"] == "chunk":
                         content = chunk["content"]
                         accumulated_text.append(content)
+                        
+                        # Cancel progress task on first chunk
+                        if first_chunk:
+                            progress_task.cancel()
+                            first_chunk = False
                         
                         # Send chunk to client
                         await ws.send_json(jsonable_encoder({
@@ -121,6 +139,13 @@ async def ws_endpoint(ws: WebSocket):
                         new_tid = chunk.get("thread_id")
                 
                 agent_ms = int((time.perf_counter() - t1) * 1000)
+                
+                # Clean up progress task
+                progress_task.cancel()
+                try:
+                    await progress_task
+                except asyncio.CancelledError:
+                    pass
                 
                 # Send stream end with metadata
                 await ws.send_json(jsonable_encoder({

@@ -341,7 +341,8 @@
                     streamingMessages[messageId] = {
                         content: [],
                         element: null,
-                        agent: 'hr_agent'
+                        agent: 'hr_agent',
+                        statusElement: null
                     };
                     // Create initial empty message
                     var chat = document.getElementById('chat');
@@ -356,6 +357,22 @@
                     chat.scrollTop = chat.scrollHeight;
                     streamingMessages[messageId].element = bubble;
                     addDebugEntry('incoming', 'Stream Start', data);
+                    return;
+                }
+                
+                if (data.type === "status") {
+                    var messageId = data.message_id;
+                    var statusText = data.status;
+                    
+                    if (streamingMessages[messageId]) {
+                        var bubble = streamingMessages[messageId].element;
+                        if (bubble) {
+                            // Add status message in italic below the cursor
+                            bubble.innerHTML = '<b>Hr_agent:</b> <span class="streaming-cursor">▋</span><br><span style="color: #6b7280; font-style: italic; font-size: 0.9em;">' + statusText + '</span>';
+                            var chat = document.getElementById('chat');
+                            chat.scrollTop = chat.scrollHeight;
+                        }
+                    }
                     return;
                 }
                 
