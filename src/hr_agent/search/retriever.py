@@ -10,12 +10,18 @@ from hr_agent.telemetry import get_tracer
 
 tracer = get_tracer("hr-agent.search")
 
+# Cache the SearchClient to avoid recreation overhead
+_search_client: SearchClient | None = None
+
 def _client() -> SearchClient:
-    if settings.search_api_key:
-        cred = AzureKeyCredential(settings.search_api_key)
-    else:
-        cred = DefaultAzureCredential()
-    return SearchClient(endpoint=settings.search_endpoint, index_name=settings.search_index, credential=cred)
+    global _search_client
+    if _search_client is None:
+        if settings.search_api_key:
+            cred = AzureKeyCredential(settings.search_api_key)
+        else:
+            cred = DefaultAzureCredential()
+        _search_client = SearchClient(endpoint=settings.search_endpoint, index_name=settings.search_index, credential=cred)
+    return _search_client
 
 def search_hr_chunks(query: str, top: int = 3) -> List[Dict]:
     """
