@@ -1,6 +1,7 @@
+import asyncio
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast, AsyncGenerator
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -78,15 +79,91 @@ async def ws_endpoint(ws: WebSocket):
 
             await send_debug(ws, "outgoing", "Client message", {"message": user_msg})
 
-            # Run the agent
+            # Run the agent in streaming mode
             t1 = time.perf_counter()
-            answer, new_tid = await ask(
-                user_msg,
-                thread_id=thread_id,
-                reuse_thread=True,
-                stream=False,
-            )
-            agent_ms = int((time.perf_counter() - t1) * 1000)
+            
+            # Generate unique message ID for this response
+            import uuid
+            message_id = str(uuid.uuid4())
+            
+            try:
+                # Send stream start
+                await ws.send_json(jsonable_encoder({
+                    "type": "stream_start",
+                    "message_id": message_id,
+                    "session_id": session_id
+                }))
+                
+                # Background task to show "Still working..." after 3 seconds
+                async def _show_progress():
+                    await asyncio.sleep(3.0)
+                    await ws.send_json(jsonable_encoder({
+                        "type": "status",
+                        "message_id": message_id,
+                        "status": "Still working..."
+                    }))
+                
+                progress_task = asyncio.create_task(_show_progress())
+                
+                stream_result = await ask(
+                    user_msg,
+                    thread_id=thread_id,
+                    reuse_thread=True,
+                    stream=True,
+                    session_id=session_id,
+                )
+                stream_generator = cast(AsyncGenerator[dict, None], stream_result)
+                
+                accumulated_text = []
+                new_tid = None
+                first_chunk = True
+                
+                async for chunk in stream_generator:
+                    if chunk["type"] == "chunk":
+                        content = chunk["content"]
+                        accumulated_text.append(content)
+                        
+                        # Cancel progress task on first chunk
+                        if first_chunk:
+                            progress_task.cancel()
+                            first_chunk = False
+                        
+                        # Send chunk to client
+                        await ws.send_json(jsonable_encoder({
+                            "type": "stream_chunk",
+                            "message_id": message_id,
+                            "content": content
+                        }))
+                        
+                    elif chunk["type"] == "done":
+                        new_tid = chunk.get("thread_id")
+                
+                agent_ms = int((time.perf_counter() - t1) * 1000)
+                
+                # Clean up progress task
+                progress_task.cancel()
+                try:
+                    await progress_task
+                except asyncio.CancelledError:
+                    pass
+                
+                # Send stream end with metadata
+                await ws.send_json(jsonable_encoder({
+                    "type": "stream_end",
+                    "message_id": message_id,
+                    "thread_id": new_tid,
+                    "timings_ms": {"agent_total_ms": agent_ms}
+                }))
+            
+            except Exception as e:
+                # Send error message to client on stream failure
+                await send_debug(ws, "error", "Stream error", {"error": str(e), "message_id": message_id})
+                await ws.send_json(jsonable_encoder({
+                    "type": "stream_error",
+                    "message_id": message_id,
+                    "error": str(e)
+                }))
+                continue
 
             # Persist thread only if missing/changed
             if new_tid and new_tid != thread_id:
@@ -103,17 +180,16 @@ async def ws_endpoint(ws: WebSocket):
                     },
                 )
                 thread_id = new_tid
-
-            response = {
-                "answer": answer,
+            
+            # Send debug info with complete answer
+            await send_debug(ws, "incoming", "Server response complete", {
+                "message_id": message_id,
+                "answer": "".join(accumulated_text),
                 "agent": "hr_agent",
                 "session_id": session_id,
                 "thread_id": thread_id,
-                "timings_ms": {"agent_total_ms": agent_ms},
-            }
-
-            await send_debug(ws, "incoming", "Server response", response)
-            await ws.send_json(jsonable_encoder(response))
+                "timings_ms": {"agent_total_ms": agent_ms}
+            })
 
     except WebSocketDisconnect:
         # Client closed

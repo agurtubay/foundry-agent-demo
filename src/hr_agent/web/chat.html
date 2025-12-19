@@ -212,6 +212,14 @@
             white-space: pre-wrap;
             word-break: break-word;
         }
+        .streaming-cursor {
+            animation: blink 1s infinite;
+            color: #6366f1;
+        }
+        @keyframes blink {
+            0%, 49% { opacity: 1; }
+            50%, 100% { opacity: 0; }
+        }
         @media (max-width: 1200px) {
             .main-container {
                 flex-direction: column;
@@ -275,6 +283,9 @@
         );
         var conversationHistory = [];
         
+        // Track streaming messages
+        var streamingMessages = {};
+        
         function formatConversationHistory() {
             return conversationHistory.map(item => {
                 if (item.role === 'user' || item.role === 'You') {
@@ -324,7 +335,115 @@
                     return;
                 }
                 
-                // Handle regular chat responses
+                // Handle streaming responses
+                if (data.type === "stream_start") {
+                    var messageId = data.message_id;
+                    streamingMessages[messageId] = {
+                        content: [],
+                        element: null,
+                        agent: 'hr_agent',
+                        statusElement: null
+                    };
+                    // Create initial empty message
+                    var chat = document.getElementById('chat');
+                    var msgDiv = document.createElement('div');
+                    msgDiv.className = 'message bot';
+                    msgDiv.id = 'msg-' + messageId;
+                    var bubble = document.createElement('div');
+                    bubble.className = 'bubble';
+                    bubble.innerHTML = '<b>Hr_agent:</b> <span class="streaming-cursor">▋</span>';
+                    msgDiv.appendChild(bubble);
+                    chat.appendChild(msgDiv);
+                    chat.scrollTop = chat.scrollHeight;
+                    streamingMessages[messageId].element = bubble;
+                    addDebugEntry('incoming', 'Stream Start', data);
+                    return;
+                }
+                
+                if (data.type === "status") {
+                    var messageId = data.message_id;
+                    var statusText = data.status;
+                    
+                    if (streamingMessages[messageId]) {
+                        var bubble = streamingMessages[messageId].element;
+                        if (bubble) {
+                            // Add status message in italic below the cursor
+                            bubble.innerHTML = '<b>Hr_agent:</b> <span class="streaming-cursor">▋</span><br><span style="color: #6b7280; font-style: italic; font-size: 0.9em;">' + statusText + '</span>';
+                            var chat = document.getElementById('chat');
+                            chat.scrollTop = chat.scrollHeight;
+                        }
+                    }
+                    return;
+                }
+                
+                if (data.type === "stream_chunk") {
+                    var messageId = data.message_id;
+                    var content = data.content;
+                    
+                    if (streamingMessages[messageId]) {
+                        streamingMessages[messageId].content.push(content);
+                        var fullText = streamingMessages[messageId].content.join('');
+                        var bubble = streamingMessages[messageId].element;
+                        if (bubble) {
+                            // Display raw text during streaming for better performance and immediate feedback
+                            // Escape HTML to prevent XSS while streaming
+                            var escapedText = fullText
+                                .replace(/&/g, '&amp;')
+                                .replace(/</g, '&lt;')
+                                .replace(/>/g, '&gt;')
+                                .replace(/\n/g, '<br>');
+                            bubble.innerHTML = '<b>Hr_agent:</b> ' + escapedText + '<span class="streaming-cursor">▋</span>';
+                            var chat = document.getElementById('chat');
+                            chat.scrollTop = chat.scrollHeight;
+                        }
+                    }
+                    return;
+                }
+                
+                if (data.type === "stream_end") {
+                    var messageId = data.message_id;
+                    
+                    if (streamingMessages[messageId]) {
+                        var fullText = streamingMessages[messageId].content.join('');
+                        var bubble = streamingMessages[messageId].element;
+                        if (bubble) {
+                            // Remove cursor and finalize
+                            bubble.innerHTML = '<b>Hr_agent:</b> ' + marked.parse(fullText);
+                        }
+                        conversationHistory.push({role: 'hr_agent', msg: fullText});
+                        addDebugEntry('incoming', 'Stream End', {
+                            message_id: messageId,
+                            thread_id: data.thread_id,
+                            timings_ms: data.timings_ms,
+                            content_length: fullText.length
+                        });
+                        delete streamingMessages[messageId];
+                    }
+                    return;
+                }
+                
+                if (data.type === "stream_error") {
+                    var messageId = data.message_id;
+                    var errorMsg = data.error || 'An error occurred';
+                    
+                    if (streamingMessages[messageId]) {
+                        var bubble = streamingMessages[messageId].element;
+                        if (bubble) {
+                            var partialText = streamingMessages[messageId].content.join('');
+                            bubble.innerHTML = '<b>Hr_agent:</b> ' + 
+                                (partialText ? marked.parse(partialText) : '') + 
+                                '<span style="color: #ef4444; font-style: italic;"><br>[Error: Stream interrupted - ' + errorMsg + ']</span>';
+                        }
+                        addDebugEntry('error', 'Stream Error', {
+                            message_id: messageId,
+                            error: errorMsg
+                        });
+                        delete streamingMessages[messageId];
+                    }
+                    return;
+                }
+                
+                // Handle legacy non-streaming responses (fallback)
                 var answer = data.answer || event.data;
                 var agent = data.agent || 'Bot';
                 addMessage(agent, answer);
@@ -335,6 +454,40 @@
                 conversationHistory.push({role: 'Bot', msg: event.data});
                 addDebugEntry('incoming', 'Raw Server Response', event.data);
             }
+        };
+        
+        ws.onerror = function(error) {
+            console.error('WebSocket error:', error);
+            addDebugEntry('error', 'WebSocket Error', 'Connection error occurred');
+            
+            // Mark any pending streaming messages as interrupted
+            for (var messageId in streamingMessages) {
+                var bubble = streamingMessages[messageId].element;
+                if (bubble) {
+                    var partialText = streamingMessages[messageId].content.join('');
+                    bubble.innerHTML = '<b>Hr_agent:</b> ' + 
+                        (partialText ? marked.parse(partialText) : '') + 
+                        '<span style="color: #ef4444; font-style: italic;"><br>[Connection lost]</span>';
+                }
+            }
+            streamingMessages = {};
+        };
+        
+        ws.onclose = function() {
+            console.log('WebSocket connection closed');
+            addDebugEntry('info', 'Connection Closed', 'WebSocket connection has been closed');
+            
+            // Mark any pending streaming messages as interrupted
+            for (var messageId in streamingMessages) {
+                var bubble = streamingMessages[messageId].element;
+                if (bubble) {
+                    var partialText = streamingMessages[messageId].content.join('');
+                    bubble.innerHTML = '<b>Hr_agent:</b> ' + 
+                        (partialText ? marked.parse(partialText) : '') + 
+                        '<span style="color: #ef4444; font-style: italic;"><br>[Connection closed]</span>';
+                }
+            }
+            streamingMessages = {};
         };
         
         function toggleImageInput() {
