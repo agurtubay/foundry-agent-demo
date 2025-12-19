@@ -19,7 +19,7 @@
             width: 100%;
         }
         .chatbot-container {
-            flex: 1;
+            flex: 1.35;
             display: flex;
             flex-direction: column;
             justify-content: center;
@@ -39,7 +39,7 @@
             box-shadow: 0 4px 24px rgba(0,0,0,0.08);
             border-radius: 18px;
             width: 100%;
-            max-width: 480px;
+            max-width: 680px;
             min-height: 70vh;
             display: flex;
             flex-direction: column;
@@ -148,6 +148,7 @@
             font-size: 1rem;
             outline: none;
             background: #fff;
+            width:80%
         }
         #sendImageCheckbox {
             margin-right: 0.2rem;
@@ -216,6 +217,32 @@
             animation: blink 1s infinite;
             color: #6366f1;
         }
+        .input-area {
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        }
+
+        .controls-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        }
+
+        .controls-right {
+        display: flex;
+        gap: 10px;
+        }
+
+        .toggle {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        user-select: none;
+        }
+
         @keyframes blink {
             0%, 49% { opacity: 1; }
             50%, 100% { opacity: 0; }
@@ -242,12 +269,20 @@
                 <div class="chat-header">Chatbot</div>
                 <div id="chat"></div>
                 <div class="input-area">
-                    <input id="messageInput" type="text" autocomplete="off" placeholder="Type your message..."/>
-                    <label><input type="checkbox" id="sendImageCheckbox" onchange="toggleImageInput()"> Image</label>
-                    <input id="imageUrlInput" type="text" placeholder="Image URL" style="display:none; margin-left:0.5em; max-width:200px;"/>
-                    <button onclick="sendMessage()">Send</button>
-                    <button onclick="newChat()">New chat</button>
-                </div>
+  <input id="messageInput" type="text" placeholder="Type your message..." />
+
+  <div class="controls-row">
+    <label class="toggle">
+      <input type="checkbox" id="streamToggle" checked />
+      <span>Streaming</span>
+    </label>
+
+    <div class="controls-right">
+      <button id="sendBtn">Send</button>
+      <button id="newChatBtn">New chat</button>
+    </div>
+  </div>
+</div>
             </div>
         </div>
         <div class="debug-container">
@@ -490,12 +525,6 @@
             streamingMessages = {};
         };
         
-        function toggleImageInput() {
-            var checkbox = document.getElementById("sendImageCheckbox");
-            var imageUrlInput = document.getElementById("imageUrlInput");
-            imageUrlInput.style.display = checkbox.checked ? "inline" : "none";
-        }
-        
         function addMessage(role, text, hasImage) {
             var chat = document.getElementById('chat');
             var msgDiv = document.createElement('div');
@@ -519,49 +548,44 @@
         }
         
         function sendMessage() {
-            var input = document.getElementById("messageInput");
-            var imageCheckbox = document.getElementById("sendImageCheckbox");
-            var hasImage = imageCheckbox.checked;
-            var message = input.value;
-            var payload = {
+            const input = document.getElementById("messageInput");
+            const message = (input.value || "").trim();
+            if (!message) return;
+
+            addMessage("You", message, false);
+            conversationHistory.push({ role: 'user', msg: message });
+
+            input.value = "";
+
+            const streamEnabled = document.getElementById("streamToggle")?.checked ?? true;
+
+            const payload = {
+                message,
                 conversation_history: formatConversationHistory(),
-                has_image: hasImage,
-                customer_id: "CUST001",
-                message: message
+                streaming: streamEnabled
             };
-            
-            // Handle image
-            if (hasImage) {
-                var imageUrlInput = document.getElementById("imageUrlInput");
-                var imageUrl = imageUrlInput.value;
-                if (imageUrl) {
-                    payload.image_url = imageUrl;
-                    addMessage('user', message, true);
-                    conversationHistory.push({role: 'user', msg: message, has_image: true, image_url: imageUrl});
-                    addDebugEntry('outgoing', 'Client Request (with image URL)', payload);
-                    ws.send(JSON.stringify(payload));
-                    input.value = '';
-                    imageUrlInput.value = '';
-                    return;
-                } else {
-                    alert("Please enter an image URL.");
-                    return;
-                }
-            }
-            
-            // No image
-            addMessage('user', message, false);
-            conversationHistory.push({role: 'user', msg: message, has_image: false});
-            addDebugEntry('outgoing', 'Client Request', payload);
+
+            addDebugEntry("outgoing", "Client message", payload);
+
             ws.send(JSON.stringify(payload));
-            input.value = '';
         }
+
         
         document.getElementById("messageInput").addEventListener("keydown", function(e) {
             if (e.key === "Enter") {
                 sendMessage();
             }
         });
+
+    document.getElementById("sendBtn")?.addEventListener("click", sendMessage);
+    document.getElementById("newChatBtn")?.addEventListener("click", newChat);
+
+    document.getElementById("messageInput")?.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
     </script>
 </body>
 </html>

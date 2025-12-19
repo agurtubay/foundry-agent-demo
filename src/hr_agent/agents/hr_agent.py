@@ -49,14 +49,10 @@ class HRSearchPlugin:
         name="search_hr_chunks",
         description="Search HR policy chunks in Azure AI Search. Input is a natural-language query."
     )
-    def search_hr_chunks(self, query: str, top: int = 5) -> str:
+    def search_hr_chunks(self, query: str, top: int = 3) -> str:
         rows = search_hr_chunks(query=query, top=top)
         compact = [
-            {
-                "chunk_id": r["chunk_id"],
-                "file": r["file"],
-                "chunk": (r["chunk"] or "")[:1200],
-            }
+            {"chunk_id": r["chunk_id"], "file": r["file"], "chunk": (r["chunk"] or "")[:1200]}
             for r in rows
         ]
         return json.dumps(compact, ensure_ascii=False)
@@ -111,10 +107,9 @@ async def ask(
     cosmos = await get_cosmos_store()
 
     # Always load cosmos_tid when reuse_thread=True, so we can detect changes
-    if reuse_thread:
+    if reuse_thread and not thread_id:
         cosmos_tid = await cosmos.get_thread_id(session_id)
-        if not thread_id:
-            thread_id = cosmos_tid
+        thread_id = cosmos_tid
     else:
         cosmos_tid = None
 
